@@ -1,0 +1,354 @@
+import pygame, sys, random, os, pickle
+
+# Init
+pygame.init()
+
+# Fullscreen toggleable
+screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+WIDTH, HEIGHT = screen.get_size()
+pygame.display.set_caption("Azərbaycan Blast")
+
+# Grid settings
+ROWS, COLS = 8, 8
+CELL_SIZE = min(WIDTH // (COLS + 4), HEIGHT // (ROWS + 6))
+GRID_W, GRID_H = COLS * CELL_SIZE, ROWS * CELL_SIZE
+GRID_ORIGIN = ((WIDTH - GRID_W) // 2, 80)
+
+# Colors
+BLUE = (0, 0, 180)
+WHITE = (255, 255, 255)
+RED = (200, 0, 0)
+GREEN = (0, 150, 0)
+CYAN = (0, 180, 180)
+YELLOW = (200, 200, 0)
+PURPLE = (200, 0, 200)
+ORANGE = (255, 128, 0)
+PINK = (255, 105, 180)
+COLORS = [RED, CYAN, YELLOW, GREEN, PURPLE, ORANGE, PINK]
+
+# Fonts
+FONT_BIG = pygame.font.SysFont("Arial", 72, bold=True)
+FONT = pygame.font.SysFont("Arial", 48)
+FONT_SMALL = pygame.font.SysFont("Arial", 32)
+
+SAVE_DIR = "saves"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+# --- Shapes ---
+BASE_SHAPES = [
+    [[1]],
+    [[1, 1]],
+    [[1, 1, 1]],
+    [[1, 1, 1, 1]],
+    [[1, 1, 1, 1, 1]],
+    [[1, 1], [1, 1]],
+    [[1, 1, 1], [0, 1, 0]],
+    [[1, 1, 0], [0, 1, 1]],
+    [[1, 0], [1, 0], [1, 1]],
+]
+
+def rotate(shape):
+    return [list(row) for row in zip(*shape[::-1])]
+
+def flip_horizontal(shape):
+    return [row[::-1] for row in shape]
+
+def normalize(shape):
+    rows = [list(r) for r in shape]
+    while rows and all(x == 0 for x in rows[0]):
+        rows.pop(0)
+    while rows and all(x == 0 for x in rows[-1]):
+        rows.pop(-1)
+    if not rows:
+        return [[]]
+    cols = len(rows[0])
+    left = 0
+    while left < cols and all(row[left] == 0 for row in rows):
+        left += 1
+    right = cols - 1
+    while right >= 0 and all(row[right] == 0 for row in rows):
+        right -= 1
+    trimmed = [row[left:right + 1] for row in rows]
+    return trimmed
+
+def shape_to_key(shape):
+    norm = normalize(shape)
+    return tuple(tuple(row) for row in norm)
+
+def all_orientations(base):
+    seen = set()
+    results = []
+    variants = [base, flip_horizontal(base)]
+    for var in variants:
+        current = var
+        for _ in range(4):
+            key = shape_to_key(current)
+            if key not in seen:
+                seen.add(key)
+                results.append(normalize(current))
+            current = rotate(current)
+    return results
+
+SHAPES = []
+for b in BASE_SHAPES:
+    SHAPES.extend(all_orientations(b))
+
+def new_piece():
+    return {
+        "shape": [row[:] for row in random.choice(SHAPES)],
+        "color": random.choice(COLORS),
+        "rect": pygame.Rect(0, 0, 0, 0)
+    }
+
+# --- Save / Load ---
+def save_game(slot, grid, pieces, score):
+    data = {"grid": grid, "pieces": pieces, "score": score}
+    with open(os.path.join(SAVE_DIR, f"slot{slot}.pkl"), "wb") as f:
+        pickle.dump(data, f)
+
+def load_game(slot):
+    path = os.path.join(SAVE_DIR, f"slot{slot}.pkl")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return None
+
+# --- Drawing ---
+def draw_grid(grid):
+    for r in range(ROWS):
+        for c in range(COLS):
+            rect = pygame.Rect(GRID_ORIGIN[0] + c*CELL_SIZE,
+                               GRID_ORIGIN[1] + r*CELL_SIZE,
+                               CELL_SIZE, CELL_SIZE)
+            pygame.draw.rect(screen, WHITE, rect, 1)
+            if grid[r][c]:
+                pygame.draw.rect(screen, grid[r][c], rect.inflate(-4, -4))
+
+def draw_piece(piece, pos=None, ghost=False):
+    for r, row in enumerate(piece["shape"]):
+        for c, val in enumerate(row):
+            if val:
+                x = (pos[0] if pos else piece["rect"].x) + c*CELL_SIZE
+                y = (pos[1] if pos else piece["rect"].y) + r*CELL_SIZE
+                rect = pygame.Rect(x, y, CELL_SIZE, CELL_SIZE)
+                if ghost:
+                    surf = pygame.Surface((CELL_SIZE-4, CELL_SIZE-4), pygame.SRCALPHA)
+                    surf.fill(piece["color"] + (120,))
+                    screen.blit(surf, rect.inflate(-4, -4))
+                else:
+                    pygame.draw.rect(screen, piece["color"], rect.inflate(-4, -4))
+
+# --- Logic ---
+def can_place(piece, row, col, grid):
+    for r, rowdata in enumerate(piece["shape"]):
+        for c, val in enumerate(rowdata):
+            if val:
+                rr, cc = row + r, col + c
+                if rr < 0 or rr >= ROWS or cc < 0 or cc >= COLS:
+                    return False
+                if grid[rr][cc]:
+                    return False
+    return True
+
+def place_piece(piece, row, col, grid):
+    for r, rowdata in enumerate(piece["shape"]):
+        for c, val in enumerate(rowdata):
+            if val:
+                grid[row + r][col + c] = piece["color"]
+
+def clear_lines(grid):
+    full_rows = [r for r in range(ROWS) if all(grid[r])]
+    full_cols = [c for c in range(COLS) if all(grid[r][c] for r in range(ROWS))]
+    score_gain = (len(full_rows) + len(full_cols)) * 100
+    return full_rows, full_cols, score_gain
+
+def flash_effect(grid, full_rows, full_cols):
+    for _ in range(2):
+        for r in full_rows:
+            for c in range(COLS):
+                rect = pygame.Rect(GRID_ORIGIN[0] + c*CELL_SIZE,
+                                   GRID_ORIGIN[1] + r*CELL_SIZE,
+                                   CELL_SIZE, CELL_SIZE)
+                pygame.draw.rect(screen, WHITE, rect.inflate(-2, -2))
+        for c in full_cols:
+            for r in range(ROWS):
+                rect = pygame.Rect(GRID_ORIGIN[0] + c*CELL_SIZE,
+                                   GRID_ORIGIN[1] + r*CELL_SIZE,
+                                   CELL_SIZE, CELL_SIZE)
+                pygame.draw.rect(screen, WHITE, rect.inflate(-2, -2))
+        pygame.display.flip()
+        pygame.time.delay(100)
+
+def apply_clear(grid, full_rows, full_cols):
+    for r in full_rows:
+        for c in range(COLS):
+            grid[r][c] = None
+    for c in full_cols:
+        for r in range(ROWS):
+            grid[r][c] = None
+
+def any_moves(pieces, grid):
+    return any(can_place(p, r, c, grid)
+               for p in pieces if p
+               for r in range(ROWS)
+               for c in range(COLS))
+
+# --- Screens ---
+def intro_screen():
+    clock = pygame.time.Clock()
+    text = FONT_BIG.render("Hasan Development", True, WHITE)
+    alpha = 0
+    while alpha < 255:
+        screen.fill(BLUE)
+        temp = text.copy()
+        temp.set_alpha(alpha)
+        screen.blit(temp, (WIDTH//2 - temp.get_width()//2,
+                           HEIGHT//2 - temp.get_height()//2))
+        pygame.display.flip()
+        alpha += 3
+        clock.tick(60)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_F4 and (event.mod & pygame.KMOD_ALT):
+                pygame.quit(); sys.exit()
+    pygame.time.delay(800)
+
+def draw_flag_background():
+    stripe_height = HEIGHT // 3
+    pygame.draw.rect(screen, (0, 102, 204), (0, 0, WIDTH, stripe_height))
+    pygame.draw.rect(screen, (204, 0, 0), (0, stripe_height, WIDTH, stripe_height))
+    pygame.draw.rect(screen, (0, 153, 0), (0, stripe_height*2, WIDTH, stripe_height))
+    pygame.draw.circle(screen, WHITE, (WIDTH//2 - 50, HEIGHT//2), 60)
+    pygame.draw.circle(screen, (204,0,0), (WIDTH//2 - 35, HEIGHT//2), 50)
+
+def start_screen():
+    while True:
+        draw_flag_background()
+        title = FONT_BIG.render("Azərbaycan Blast", True, WHITE)
+        msg = FONT.render("Choose Save Slot (1-5)", True, WHITE)
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, HEIGHT//3))
+        screen.blit(msg, (WIDTH//2 - msg.get_width()//2, HEIGHT//2))
+        pygame.display.flip()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    pygame.quit(); sys.exit()
+                if event.key == pygame.K_F4 and (event.mod & pygame.KMOD_ALT):
+                    pygame.quit(); sys.exit()
+                if pygame.K_1 <= event.key <= pygame.K_5:
+                    return event.key - pygame.K_0  # slot number
+
+def game_over_screen(score):
+    while True:
+        screen.fill(BLUE)
+        over = FONT_BIG.render("GAME OVER", True, WHITE)
+        sc = FONT.render(f"Score: {score}", True, WHITE)
+        msg = FONT.render("Press Any Key to Restart", True, WHITE)
+        screen.blit(over, (WIDTH//2 - over.get_width()//2, HEIGHT//3))
+        screen.blit(sc, (WIDTH//2 - sc.get_width()//2, HEIGHT//2))
+        screen.blit(msg, (WIDTH//2 - msg.get_width()//2, HEIGHT//2 + 100))
+        pygame.display.flip()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    pygame.quit(); sys.exit()
+                if event.key == pygame.K_F4 and (event.mod & pygame.KMOD_ALT):
+                    pygame.quit(); sys.exit()
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                return
+
+# ---- Main Game ----
+intro_screen()
+
+while True:
+    slot = start_screen()
+    save = load_game(slot)
+
+    if save:
+        grid, pieces, score = save["grid"], save["pieces"], save["score"]
+    else:
+        grid = [[None for _ in range(COLS)] for _ in range(ROWS)]
+        pieces = [new_piece() for _ in range(3)]
+        score = 0
+
+    dragging = None
+    running = True
+
+    while running:
+        screen.fill(BLUE)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
+                    pygame.quit(); sys.exit()
+                if event.key == pygame.K_F4 and (event.mod & pygame.KMOD_ALT):
+                    pygame.quit(); sys.exit()
+                if event.key == pygame.K_RETURN and (event.mod & pygame.KMOD_ALT):
+                    pygame.display.toggle_fullscreen()
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                for piece in pieces:
+                    if not piece: continue
+                    pw = len(piece["shape"][0]) * CELL_SIZE
+                    ph = len(piece["shape"]) * CELL_SIZE
+                    rect = pygame.Rect(piece["rect"].x, piece["rect"].y, pw, ph)
+                    if rect.collidepoint(event.pos):
+                        dragging = piece
+
+            if event.type == pygame.MOUSEBUTTONUP and dragging:
+                mx, my = event.pos
+                col = (mx - GRID_ORIGIN[0]) // CELL_SIZE
+                row = (my - GRID_ORIGIN[1]) // CELL_SIZE
+                if 0 <= row < ROWS and 0 <= col < COLS and can_place(dragging, row, col, grid):
+                    place_piece(dragging, row, col, grid)
+                    full_rows, full_cols, gained = clear_lines(grid)
+                    if full_rows or full_cols:
+                        flash_effect(grid, full_rows, full_cols)
+                        apply_clear(grid, full_rows, full_cols)
+                        score += gained
+                    pieces[pieces.index(dragging)] = None
+                    save_game(slot, grid, pieces, score)
+                dragging = None
+
+        if all(p is None for p in pieces):
+            pieces = [new_piece() for _ in range(3)]
+            save_game(slot, grid, pieces, score)
+
+        draw_grid(grid)
+
+        slot_y = GRID_ORIGIN[1] + GRID_H + 80
+        spacing = WIDTH // 4
+        for i, piece in enumerate(pieces):
+            if piece and piece != dragging:
+                piece["rect"].topleft = (spacing*(i+1) - CELL_SIZE, slot_y)
+                draw_piece(piece)
+
+        if dragging:
+            mx, my = pygame.mouse.get_pos()
+            draw_piece(dragging, pos=(mx, my - CELL_SIZE))
+            col = (mx - GRID_ORIGIN[0]) // CELL_SIZE
+            row = (my - GRID_ORIGIN[1]) // CELL_SIZE
+            if 0 <= row < ROWS and 0 <= col < COLS and can_place(dragging, row, col, grid):
+                ghost_x = GRID_ORIGIN[0] + col * CELL_SIZE
+                ghost_y = GRID_ORIGIN[1] + row * CELL_SIZE
+                draw_piece(dragging, pos=(ghost_x, ghost_y), ghost=True)
+
+        screen.blit(FONT.render(f"Score: {score}", True, WHITE), (20, 20))
+
+        if not any_moves([p for p in pieces if p], grid):
+            save_game(slot, [[None for _ in range(COLS)] for _ in range(ROWS)], [new_piece() for _ in range(3)], 0)
+            game_over_screen(score)
+            running = False
+
+        pygame.display.flip()
